@@ -1,24 +1,8 @@
 export class PeerConnection {
   readonly rtcConnection: RTCPeerConnection;
-  channel: RTCDataChannel | undefined;
 
   constructor(configuration?: RTCConfiguration | undefined) {
     this.rtcConnection = new RTCPeerConnection(configuration);
-
-    this.rtcConnection.ondatachannel = (event) => {
-      event.channel.onmessage = (e) => console.log("Messsage:" + e.data);
-      event.channel.onopen = () => console.log("Data channel open");
-      event.channel.onclose = () => console.log("Data channel closed");
-      this.channel = event.channel;
-    };
-  }
-
-  getChannel(): RTCDataChannel {
-    const dataChannel = this.rtcConnection.createDataChannel("channel");
-    dataChannel.onmessage = (e) => console.log("Messsage received:" + e.data);
-    dataChannel.onopen = () => console.log("Data channel open");
-    dataChannel.onclose = () => console.log("Data channel closed");
-    return dataChannel;
   }
 
   async getOffer(): Promise<string> {

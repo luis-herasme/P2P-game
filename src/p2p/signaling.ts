@@ -16,23 +16,22 @@ export class SignalingClient {
     this.eventEmitter.on("answer", (answer) => {
       this.eventEmitter.emit(answer.messageId, answer);
     });
+  }
 
-    this.eventEmitter.on("offer", async (offer) => {
-      const connection = new PeerConnection();
+  async answer(offer: Offer) {
+    const connection = new PeerConnection();
 
-      await connection.rtcConnection.setRemoteDescription({
-        type: "offer",
-        sdp: offer.data,
-      });
+    await connection.rtcConnection.setRemoteDescription({
+      type: "offer",
+      sdp: offer.data,
+    });
 
-      const answer = await connection.getAnswer();
-      this.sendAnswer(offer, answer);
+    const answer = await connection.getAnswer();
+    this.sendAnswer(offer, answer);
 
-      connection.rtcConnection.addEventListener("connectionstatechange", () => {
-        if (connection.rtcConnection.connectionState === "connected") {
-          this.eventEmitter.emit("offer-listener", connection);
-        }
-      });
+    return new Promise<RTCDataChannel>((resolve) => {
+      connection.rtcConnection.ondatachannel = (event) =>
+        resolve(event.channel);
     });
   }
 
@@ -49,14 +48,14 @@ export class SignalingClient {
     });
   }
 
-  connectRequest(fn: (connection: PeerConnection) => void) {
-    this.eventEmitter.on("offer-listener", fn);
-    return () => this.eventEmitter.off("offer-listener", fn);
+  connectRequest(fn: (offer: Offer) => void) {
+    this.eventEmitter.on("offer", fn);
+    return () => this.eventEmitter.off("offer", fn);
   }
 
   async connect(otherPeerId: string): Promise<RTCDataChannel> {
     const connection = new PeerConnection();
-    const channel = connection.getChannel();
+    const channel = connection.rtcConnection.createDataChannel("channel");
 
     const offer = await connection.getOffer();
     const answer = await this.sendOffer(otherPeerId, offer);
@@ -66,7 +65,9 @@ export class SignalingClient {
       sdp: answer,
     });
 
-    return channel;
+    return new Promise<RTCDataChannel>((resolve) => {
+      channel.onopen = () => resolve(channel);
+    });
   }
 
   private async sendRaw(data: MessageToServer) {
@@ -105,12 +106,20 @@ type MessageToServer = {
   messageId: string;
 };
 
-type MessageFromServer = {
+type MessageFromServer = Offer | Answer;
+
+type Offer = {
   to: string;
   data: string;
-  type: "offer" | "answer";
+  type: "offer";
   messageId: string;
+  from: string;
+};
 
-  // Added by the signaling server
+type Answer = {
+  to: string;
+  data: string;
+  type: "answer";
+  messageId: string;
   from: string;
 };
