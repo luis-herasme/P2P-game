@@ -1,125 +1,95 @@
-import { PeerConnection } from "./connection";
-import { EventEmitter } from "./event-emitter";
+import { TypedSocket } from "./typed-socket";
+import { getAnswer, getOffer } from "./peer-utils";
+import type { ClientToServer, ServerToClient } from "../../server/src/index";
+
+type Config = {
+  id: string;
+  serverAddress: string;
+};
 
 export class SignalingClient {
-  readonly socket: WebSocket;
-  readonly eventEmitter = new EventEmitter();
+  id: string;
+  readonly socket: TypedSocket<ServerToClient, ClientToServer>;
 
-  private constructor(serverAddr: string) {
-    this.socket = new WebSocket(serverAddr);
-
-    this.socket.onmessage = async (message) => {
-      const json = JSON.parse(message.data);
-      this.eventEmitter.emit(json.type, json);
-    };
-
-    this.eventEmitter.on("answer", (answer) => {
-      this.eventEmitter.emit(answer.messageId, answer);
-    });
+  private constructor(config: Config) {
+    this.id = config.id;
+    this.socket = new TypedSocket(config.serverAddress);
   }
-
-  async answer(offer: Offer) {
-    const connection = new PeerConnection();
-
-    await connection.rtcConnection.setRemoteDescription({
-      type: "offer",
-      sdp: offer.data,
-    });
-
-    const answer = await connection.getAnswer();
-    this.sendAnswer(offer, answer);
-
-    return new Promise<RTCDataChannel>((resolve) => {
-      connection.rtcConnection.ondatachannel = (event) =>
-        resolve(event.channel);
-    });
-  }
-
-  id = "";
 
   static async create(serverAddress: string) {
-    const signaling = new SignalingClient(serverAddress);
+    const peerId = crypto.randomUUID();
+    const messageId = crypto.randomUUID();
+
+    const signaling = new SignalingClient({
+      id: peerId,
+      serverAddress,
+    });
 
     return new Promise<SignalingClient>((resolve) => {
-      signaling.eventEmitter.once("id", (body) => {
-        signaling.id = body.id;
-        resolve(signaling);
+      signaling.socket.send({
+        type: "setId",
+        body: peerId,
       });
     });
   }
 
-  connectRequest(fn: (offer: Offer) => void) {
-    this.eventEmitter.on("offer", fn);
-    return () => this.eventEmitter.off("offer", fn);
+  async answer(offer: ServerToClient["offer"]): Promise<RTCDataChannel> {
+    const connection = new RTCPeerConnection();
+
+    await connection.setRemoteDescription({
+      type: "offer",
+      sdp: offer.sdp,
+    });
+
+    const answer = await getAnswer(connection);
+
+    this.socket.send({
+      type: "answer",
+      to: offer.from,
+      sdp: answer,
+      messageId: offer.messageId,
+    });
+
+    return new Promise((resolve) => {
+      connection.ondatachannel = (event) => {
+        resolve(event.channel);
+      };
+    });
   }
 
   async connect(otherPeerId: string): Promise<RTCDataChannel> {
-    const connection = new PeerConnection();
-    const channel = connection.rtcConnection.createDataChannel("channel");
+    const connection = new RTCPeerConnection();
+    const channel = connection.createDataChannel("channel");
+    const offer = await getOffer(connection);
 
-    const offer = await connection.getOffer();
-    const answer = await this.sendOffer(otherPeerId, offer);
-
-    await connection.rtcConnection.setRemoteDescription({
-      type: "answer",
-      sdp: answer,
-    });
-
-    return new Promise<RTCDataChannel>((resolve) => {
-      channel.onopen = () => resolve(channel);
-    });
-  }
-
-  private async sendRaw(data: MessageToServer) {
-    this.socket.send(JSON.stringify(data));
-  }
-
-  async sendOffer(to: string, offer: string) {
     const messageId = crypto.randomUUID();
 
-    return await new Promise<string>((resolve) => {
-      this.sendRaw({
-        to,
-        data: offer,
-        type: "offer",
-        messageId,
-      });
+    await this.socket.send({
+      type: "offer",
+      to: otherPeerId,
+      sdp: offer,
+      messageId: messageId,
+    });
 
-      this.eventEmitter.once(messageId, (answer) => resolve(answer.data));
+    this.socket.on("answer", (data) => {
+      if (data.messageId !== messageId) {
+        return;
+      }
+
+      connection.setRemoteDescription({
+        type: "answer",
+        sdp: data.sdp,
+      });
+    });
+
+    return new Promise((resolve) => {
+      channel.onopen = () => {
+        resolve(channel);
+      };
     });
   }
 
-  async sendAnswer(offer: MessageFromServer, answer: string) {
-    this.sendRaw({
-      to: offer.from,
-      data: answer,
-      type: "answer",
-      messageId: offer.messageId,
-    });
+  connectRequest(fn: (offer: ServerToClient["offer"]) => void) {
+    return this.socket.on("offer", fn);
   }
 }
-
-type MessageToServer = {
-  to: string;
-  data: string;
-  type: "offer" | "answer";
-  messageId: string;
-};
-
-type MessageFromServer = Offer | Answer;
-
-type Offer = {
-  to: string;
-  data: string;
-  type: "offer";
-  messageId: string;
-  from: string;
-};
-
-type Answer = {
-  to: string;
-  data: string;
-  type: "answer";
-  messageId: string;
-  from: string;
-};
